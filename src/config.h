@@ -1,0 +1,6 @@
+#pragma once
+
+#define ARDUINO 1
+#define BREWPI_LOG_INFO 1
+#define TEMP_SENSOR_CASCADED_FILTER 1
+#define TEMP_CONTROL_STATIC 1
