@@ -1,5 +1,9 @@
+#pragma once
+
 // This class makes handling local python objects easier
 // at it moves their decref to the destructor           
+#include <Python.h>
+
 typedef struct {} NewRef_PyObject;                      
                                                         
 class CPyObject {                                       
@@ -15,6 +19,12 @@ class PPyObject: public CPyObject {
     private:                                            
         PyObject *o;                                    
     public:                                             
+        PPyObject(NewRef_PyObject *o) {
+            if(o == NULL) {
+                throw std::exception();
+            }
+            this->o = (PyObject *) o;
+        }
         PPyObject(PyObject *o) {                        
             if(o == NULL) {                             
                 throw std::exception();                 

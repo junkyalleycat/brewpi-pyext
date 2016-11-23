@@ -9,15 +9,11 @@
   are included in a block towards the top of this file.
   */
 
-#include "TempControl.h"
-#include "TempSensorDisconnected.h"
-#include "PiLink.h"
 #include <stdio.h>
 #include <Python.h>
 #include <stdexcept>
-#include <sys/time.h>
-#include <typeinfo>
 #include "cpy.h"
+#include "TemperatureFormats.h"
 
 /*
    It seems that the TempControl code has mostly
@@ -75,42 +71,50 @@ long pyNumToLong(PyObject *pyNum) {
     return val;
 }
 
-/*
-   shortens a double, i was getting strange results
-   before i did this, don't care to investigate
-   */
-double shortenDouble(double v) {
-    double tmp = int(v * 100);
-    tmp /= 100;
-    return tmp;
-}
-
-double convertToTemp(char unit, double temp_c) {
+double tempToUnit(char unit, double temp_c) {
     if(unit == 'c') {
         return temp_c;
     }
     return c2f(temp_c);
 }
 
-double convertFromTemp(char unit, double temp) {
+double unitToTemp(char unit, double temp) {
     if(unit == 'c') {
         return temp;
     }
     return f2c(temp);
 }
 
-double convertToTempDiff(char unit, double temp_c) {
+double tempDiffToUnit(char unit, double temp_c) {
     if(unit == 'c') {
         return temp_c;
     }
     return c2f(temp_c) - 32;
 }
 
-double convertFromTempDiff(char unit, double temp) {
+double unitToTempDiff(char unit, double temp) {
     if(unit == 'c') {
         return temp;
     }
     return f2c(temp + 32);
+}
+
+temperature pyNumToTemp(char unit, PyObject *n) {
+    return doubleToTemp(unitToTemp(unit, pyNumToDouble(n)));
+}
+
+temperature pyNumToTempDiff(char unit, PyObject *n) {
+    return doubleToTempDiff(unitToTempDiff(unit, pyNumToDouble(n)));
+}
+
+// newref
+PyObject *tempToPyFloat(char unit, temperature t) {
+    return PyFloat_FromDouble(tempToUnit(unit, tempToDouble(t)));
+}
+
+// newref
+PyObject *tempDiffToPyFloat(char unit, temperature t) {
+    return PyFloat_FromDouble(tempDiffToUnit(unit, tempDiffToDouble(t)));
 }
 
 void pyerr_printf(const char *format, ...) {
@@ -133,20 +137,3 @@ PyObject *getFromDict(PyObject *d, const char *key) {
     return o;
 }
 
-temperature pyNumToTemp(char unit, PyObject *n) {
-    return doubleToTemp(convertFromTemp(unit, pyNumToDouble(n)));
-}
-
-temperature pyNumToTempDiff(char unit, PyObject *n) {
-    return doubleToTempDiff(convertFromTempDiff(unit, pyNumToDouble(n)));
-}
-
-// newref
-PyObject *tempToPyFloat(char unit, temperature t) {
-    return PyFloat_FromDouble(convertToTemp(unit, tempToDouble(t)));
-}
-
-// newref
-PyObject *tempDiffToPyFloat(char unit, temperature t) {
-    return PyFloat_FromDouble(convertToTempDiff(unit, tempDiffToDouble(t)));
-}

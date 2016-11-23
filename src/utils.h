@@ -1,3 +1,5 @@
+#pragma once
+
 /**
   The python glue code is entirely contained in this file.  The code
   is pretty streightforward, define a new python type (TempControl) and
@@ -9,14 +11,8 @@
   are included in a block towards the top of this file.
   */
 
-#include "TempControl.h"
-#include "TempSensorDisconnected.h"
-#include "PiLink.h"
-#include <stdio.h>
 #include <Python.h>
-#include <stdexcept>
-#include <sys/time.h>
-#include <typeinfo>
+#include "TemperatureFormats.h"
 
 /*
    It seems that the TempControl code has mostly
