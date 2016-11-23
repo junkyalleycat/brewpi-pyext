@@ -10,6 +10,7 @@ build/%.o: links/%.cpp
 
 build/%.o: src/%.cpp
 	$(CC) -c -o $@ $< $(CFLAGS)
+	$(CC) -S -o $@.s $< -Ilinks -Isrc -fpermissive $(shell pkg-config --cflags python3)
 
 build/TempControl.so: $(OBJS)
 	gcc -shared -o $@ $^ $(LIBS)
