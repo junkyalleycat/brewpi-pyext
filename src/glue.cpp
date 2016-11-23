@@ -17,6 +17,8 @@
 #include <stdexcept>
 #include <sys/time.h>
 #include <typeinfo>
+#include "utils.h"
+#include "cpy.h"
 
 // defaults taken from DeviceManager.cpp
 ValueSensor<bool> defaultSensor(false);  
@@ -24,102 +26,6 @@ ValueActuator defaultActuator;
 DisconnectedTempSensor defaultTempSensor;
 // loaded normally in Brewpi.cpp
 TicksImpl ticks = TicksImpl();
-
-/*
-   It seems that the TempControl code has mostly
-   been excercised using celsius, so
-   i won't use the format variable in
-   TempControl, but will use my own that
-   modifies temp at the gate
-   */
-double c2f(double c) {
-    return (c * 1.8) + 32;
-}
-
-double f2c(double f) {
-    return (f - 32) / 1.8;
-}
-
-double tempToDouble(temperature val) {
-    return double(val - C_OFFSET) / double(TEMP_FIXED_POINT_SCALE);
-}
-
-double tempDiffToDouble(temperature val) {
-    return double(val) / double(TEMP_FIXED_POINT_SCALE);
-}
-
-/*
-   Because a number from python might be a float or an int
-   */
-double pyNumToDouble(PyObject *pyNum) {
-    double val;
-    if(PyFloat_Check(pyNum)) {
-        val = PyFloat_AsDouble(pyNum);
-    } else if(PyLong_Check(pyNum)) {
-        val = PyLong_AsLong(pyNum);
-    } else {
-        PyErr_SetString(PyExc_RuntimeError, "must specify float or long");
-        throw std::exception();
-    }
-    return val;
-}
-
-// This class makes handling local python objects easier
-// at it moves their decref to the destructor
-typedef struct {} NewRef_PyObject;
-
-class CPyObject {
-
-    public:
-        virtual operator PyObject *() = 0;
-        virtual operator NewRef_PyObject *() = 0;
-
-};
-
-class PPyObject: public CPyObject {
-    private:
-        PyObject *o;
-    public:
-        PPyObject(PyObject *o) {
-            if(o == NULL) {
-                throw std::exception();
-            }
-            this->o = o;
-        }
-        ~PPyObject() {
-            Py_XDECREF(o);
-        }
-        operator PyObject *() {
-            return o;
-        }
-        operator NewRef_PyObject *() {
-            Py_XINCREF(o);
-            return (NewRef_PyObject *) o;
-        }
-};
-
-class UPyObject: public CPyObject {
-    private:
-        PyObject *o;
-    public:
-        UPyObject(PyObject *o) {
-            if(o == NULL) {
-                throw std::exception();
-            }
-            Py_XINCREF(o);
-            this->o = o;
-        }
-        ~UPyObject() {
-            Py_XDECREF(o);
-        }
-        operator PyObject *() {
-            return o;
-        }
-        operator NewRef_PyObject *() {
-            Py_XINCREF(o);
-            return (NewRef_PyObject *) o;
-        }
-};
 
 // called when TempControl door is open/shut, i don't have a door switch
 void PiLink::printFridgeAnnotation(char const *, ...) {
@@ -171,16 +77,6 @@ void EepromManager::storeTempSettings() {
 }
 
 /*
-   shortens a double, i was getting strange results
-   before i did this, don't care to investigate
-   */
-static double shorten(double v) {
-    double tmp = int(v * 100);
-    tmp /= 100;
-    return tmp;
-}
-
-/*
    PyBasicTempSensor wraps a BasicTempSensor.  It calls
    into python to find temperature data.
 
@@ -224,8 +120,7 @@ class PyBasicTempSensor : public BasicTempSensor {
             if(r == Py_None) {
                 temp = TEMP_SENSOR_DISCONNECTED;
             } else {
-                double c = pyNumToDouble(r);
-                temp = doubleToTemp(shorten(c));
+                temp = pyNumToTemp('c', r);
             }
 
             return temp;
@@ -299,24 +194,6 @@ typedef struct {
     char unit; // unit used when returning information using getters
 } TempControl_Object;
 
-/*
-   Anytime a temp is provided as an argument or return
-   from python, change it to internal unit
-   */
-double convertTemp(TempControl_Object *self, double temp_c) {
-    if(self->unit == 'c') {
-        return temp_c;
-    }
-    return c2f(temp_c);
-}
-
-double convertTempDiff(TempControl_Object *self, double temp_c) {
-    if(self->unit == 'c') {
-        return temp_c;
-    }
-    return c2f(temp_c) - 32;
-}
-
 static void
 TempControl_dealloc__(TempControl_Object *self) {
     if(self->beerSensor != NULL) {
@@ -381,7 +258,7 @@ static int TempControl_init__(TempControl_Object *self, PyObject *args, PyObject
         return -1;
     }
 
-    self->unit = unit;
+    unit = unit;
 
     self->beerSensor = NULL;
     self->fridgeSensor = NULL;
@@ -532,10 +409,10 @@ temperature parseSetTempArgs(TempControl_Object *self, PyObject *args, PyObject 
 
     temperature temp;
     if(c != NULL) {
-        temp = doubleToTemp(shorten(pyNumToDouble(c)));
+        temp = pyNumToTemp('c', c);
     }
     if(f != NULL) {
-        temp = doubleToTemp(shorten(f2c(pyNumToDouble(f))));
+        temp = pyNumToTemp('f', f);
     }
     return temp;
 }
@@ -663,15 +540,6 @@ TempControl_initFilters(PyObject *self, PyObject *args) {
     Py_RETURN_NONE;
 }
 
-PyObject *getFromDict(PyObject *d, const char *key) {
-    PyObject *o = PyDict_GetItemString(d, key);
-    if(o == NULL) {
-        PyErr_SetString(PyExc_RuntimeError, "key not found");
-        throw std::exception();
-    }
-    return o;
-}
-
 static PyObject *
 TempControl_setControlSettings(TempControl_Object *self, PyObject *args) {
     PyObject *cs;
@@ -683,7 +551,41 @@ TempControl_setControlSettings(TempControl_Object *self, PyObject *args) {
         return NULL;
     }
     try {
-        
+        char unit = unit;
+        tempControl.cs.mode = pyNumToLong(getFromDict(cs, "mode"));
+        tempControl.cs.beerSetting = pyNumToTemp(unit, getFromDict(cs, "beerSetting"));
+        tempControl.cs.fridgeSetting = pyNumToTemp(unit, getFromDict(cs, "fridgeSettings"));
+        tempControl.cs.heatEstimator = pyNumToTempDiff(unit, getFromDict(cs, "heatEstimator"));
+        tempControl.cs.coolEstimator = pyNumToTempDiff(unit, getFromDict(cs, "coolEstimator"));
+    } catch(...) {
+        return NULL;
+    }
+    Py_RETURN_NONE;
+}
+
+static PyObject *
+TempControl_setControlVariables(TempControl_Object *self, PyObject *args) {
+    PyObject *cv;
+    if(!PyArg_ParseTuple(args, "O", &cv)) {
+        return NULL;
+    }
+    if(!PyDict_Check(cv)) {
+        PyErr_SetString(PyExc_RuntimeError, "dictionary expected");
+        return NULL;
+    }
+    try {
+        char unit = unit;
+        tempControl.cv.beerDiff = pyNumToTempDiff(unit, getFromDict(cv, "beerDiff"));
+        tempControl.cv.diffIntegral = pyNumToTempDiff(unit, getFromDict(cv, "diffIntegral"));
+        tempControl.cv.beerSlope = pyNumToTempDiff(unit, getFromDict(cv, "beerSlope"));
+        tempControl.cv.p = pyNumToTempDiff(unit, getFromDict(cv, "p"));
+        tempControl.cv.i = pyNumToTempDiff(unit, getFromDict(cv, "i"));
+        tempControl.cv.d = pyNumToTempDiff(unit, getFromDict(cv, "d"));
+        tempControl.cv.estimatedPeak = pyNumToTempDiff(unit, getFromDict(cv, "estimatedPeak"));
+        tempControl.cv.negPeakEstimate = pyNumToTempDiff(unit, getFromDict(cv, "negPeakEstimate"));
+        tempControl.cv.posPeakEstimate = pyNumToTempDiff(unit, getFromDict(cv, "posPeakEstimate"));
+        tempControl.cv.negPeak = pyNumToTempDiff(unit, getFromDict(cv, "negPeak"));
+        tempControl.cv.posPeak = pyNumToTempDiff(unit, getFromDict(cv, "posPeak"));
     } catch(...) {
         return NULL;
     }
@@ -693,47 +595,50 @@ TempControl_setControlSettings(TempControl_Object *self, PyObject *args) {
 static NewRef_PyObject *
 TempControl_getControlSettings(TempControl_Object *self, PyObject *args) {
     PPyObject d(PyDict_New());
+    char unit = self->unit;
     PyDict_SetItemString(d, "mode", PPyObject(PyLong_FromLong(tempControl.cs.mode)));
-    PyDict_SetItemString(d, "beerSetting", PPyObject(PyFloat_FromDouble(convertTemp(self, tempToDouble(tempControl.cs.beerSetting)))));
-    PyDict_SetItemString(d, "fridgeSettings", PPyObject(PyFloat_FromDouble(convertTemp(self, tempToDouble(tempControl.cs.fridgeSetting)))));
-    PyDict_SetItemString(d, "heatEstimator", PPyObject(PyFloat_FromDouble(convertTempDiff(self, tempDiffToDouble(tempControl.cs.heatEstimator)))));
-    PyDict_SetItemString(d, "coolEstimator", PPyObject(PyFloat_FromDouble(convertTempDiff(self, tempDiffToDouble(tempControl.cs.coolEstimator)))));
+    PyDict_SetItemString(d, "beerSetting", PPyObject(tempToPyFloat(unit, tempControl.cs.beerSetting)));
+    PyDict_SetItemString(d, "fridgeSetting", PPyObject(tempToPyFloat(unit, tempControl.cs.fridgeSetting)));
+    PyDict_SetItemString(d, "heatEstimator", PPyObject(tempDiffToPyFloat(unit, tempControl.cs.heatEstimator)));
+    PyDict_SetItemString(d, "coolEstimator", PPyObject(tempDiffToPyFloat(unit, tempControl.cs.coolEstimator)));
     return d;
 }
 
 static NewRef_PyObject *
 TempControl_getControlVariables(TempControl_Object *self, PyObject *args) {
     PPyObject d(PyDict_New());
-    PyDict_SetItemString(d, "beerDiff", PPyObject(PyFloat_FromDouble(convertTempDiff(self, tempDiffToDouble(tempControl.cv.beerDiff)))));
-    PyDict_SetItemString(d, "diffIntegral", PPyObject(PyFloat_FromDouble(convertTempDiff(self, tempDiffToDouble(tempControl.cv.diffIntegral)))));
-    PyDict_SetItemString(d, "beerSlope", PPyObject(PyFloat_FromDouble(convertTempDiff(self, tempDiffToDouble(tempControl.cv.beerSlope)))));
-    PyDict_SetItemString(d, "p", PPyObject(PyFloat_FromDouble(convertTempDiff(self, tempDiffToDouble(tempControl.cv.p)))));
-    PyDict_SetItemString(d, "i", PPyObject(PyFloat_FromDouble(convertTempDiff(self, tempDiffToDouble(tempControl.cv.i)))));
-    PyDict_SetItemString(d, "d", PPyObject(PyFloat_FromDouble(convertTempDiff(self, tempDiffToDouble(tempControl.cv.d)))));
-    PyDict_SetItemString(d, "estimatedPeak", PPyObject(PyFloat_FromDouble(convertTempDiff(self, tempDiffToDouble(tempControl.cv.estimatedPeak)))));
-    PyDict_SetItemString(d, "negPeakEstimate", PPyObject(PyFloat_FromDouble(convertTempDiff(self, tempDiffToDouble(tempControl.cv.negPeakEstimate)))));
-    PyDict_SetItemString(d, "posPeakEstimate", PPyObject(PyFloat_FromDouble(convertTempDiff(self, tempDiffToDouble(tempControl.cv.posPeakEstimate)))));
-    PyDict_SetItemString(d, "negPeak", PPyObject(PyFloat_FromDouble(convertTempDiff(self, tempDiffToDouble(tempControl.cv.negPeak)))));
-    PyDict_SetItemString(d, "posPeak", PPyObject(PyFloat_FromDouble(convertTempDiff(self, tempDiffToDouble(tempControl.cv.posPeak)))));
+    char unit = self->unit;
+    PyDict_SetItemString(d, "beerDiff", PPyObject(tempDiffToPyFloat(unit, tempControl.cv.beerDiff)));
+    PyDict_SetItemString(d, "diffIntegral", PPyObject(tempDiffToPyFloat(unit, tempControl.cv.diffIntegral)));
+    PyDict_SetItemString(d, "beerSlope", PPyObject(tempDiffToPyFloat(unit, tempControl.cv.beerSlope)));
+    PyDict_SetItemString(d, "p", PPyObject(tempDiffToPyFloat(unit, tempControl.cv.p)));
+    PyDict_SetItemString(d, "i", PPyObject(tempDiffToPyFloat(unit, tempControl.cv.i)));
+    PyDict_SetItemString(d, "d", PPyObject(tempDiffToPyFloat(unit, tempControl.cv.d)));
+    PyDict_SetItemString(d, "estimatedPeak", PPyObject(tempDiffToPyFloat(unit, tempControl.cv.estimatedPeak)));
+    PyDict_SetItemString(d, "negPeakEstimate", PPyObject(tempDiffToPyFloat(unit, tempControl.cv.negPeakEstimate)));
+    PyDict_SetItemString(d, "posPeakEstimate", PPyObject(tempDiffToPyFloat(unit, tempControl.cv.posPeakEstimate)));
+    PyDict_SetItemString(d, "negPeak", PPyObject(tempDiffToPyFloat(unit, tempControl.cv.negPeak)));
+    PyDict_SetItemString(d, "posPeak", PPyObject(tempDiffToPyFloat(unit, tempControl.cv.posPeak)));
     return d;
 }
 
 static NewRef_PyObject *
 TempControl_getControlConstants(TempControl_Object *self, PyObject *args) {
     PPyObject d(PyDict_New());
+    char unit = self->unit;
     PyDict_SetItemString(d, "tempFormats", PPyObject(PyLong_FromLong(tempControl.cc.tempFormat)));
-    PyDict_SetItemString(d, "tempSettingMin", PPyObject(PyFloat_FromDouble(convertTemp(self, tempToDouble(tempControl.cc.tempSettingMin)))));
-    PyDict_SetItemString(d, "tempSettingMax", PPyObject(PyFloat_FromDouble(convertTemp(self, tempToDouble(tempControl.cc.tempSettingMax)))));
-    PyDict_SetItemString(d, "Kp", PPyObject(PyFloat_FromDouble(convertTempDiff(self, tempDiffToDouble(tempControl.cc.Kp)))));
-    PyDict_SetItemString(d, "Ki", PPyObject(PyFloat_FromDouble(convertTempDiff(self, tempDiffToDouble(tempControl.cc.Ki)))));
-    PyDict_SetItemString(d, "Kd", PPyObject(PyFloat_FromDouble(convertTempDiff(self, tempDiffToDouble(tempControl.cc.Kd)))));
-    PyDict_SetItemString(d, "iMaxError", PPyObject(PyFloat_FromDouble(convertTempDiff(self, tempDiffToDouble(tempControl.cc.iMaxError)))));
-    PyDict_SetItemString(d, "idleRangeHigh", PPyObject(PyFloat_FromDouble(convertTempDiff(self, tempDiffToDouble(tempControl.cc.idleRangeHigh)))));
-    PyDict_SetItemString(d, "idleRangeLow", PPyObject(PyFloat_FromDouble(convertTempDiff(self, tempDiffToDouble(tempControl.cc.idleRangeLow)))));
-    PyDict_SetItemString(d, "heatingTargetUpper", PPyObject(PyFloat_FromDouble(convertTempDiff(self, tempDiffToDouble(tempControl.cc.heatingTargetUpper)))));
-    PyDict_SetItemString(d, "heatingTargetLower", PPyObject(PyFloat_FromDouble(convertTempDiff(self, tempDiffToDouble(tempControl.cc.heatingTargetLower)))));
-    PyDict_SetItemString(d, "coolingTargetUpper", PPyObject(PyFloat_FromDouble(convertTempDiff(self ,tempDiffToDouble(tempControl.cc.coolingTargetUpper)))));
-    PyDict_SetItemString(d, "coolingTargetLower", PPyObject(PyFloat_FromDouble(convertTempDiff(self, tempDiffToDouble(tempControl.cc.coolingTargetLower)))));
+    PyDict_SetItemString(d, "tempSettingMin", PPyObject(tempToPyFloat(unit, tempControl.cc.tempSettingMin)));
+    PyDict_SetItemString(d, "tempSettingMax", PPyObject(tempToPyFloat(unit, tempControl.cc.tempSettingMax)));
+    PyDict_SetItemString(d, "Kp", PPyObject(tempDiffToPyFloat(unit, tempControl.cc.Kp)));
+    PyDict_SetItemString(d, "Ki", PPyObject(tempDiffToPyFloat(unit, tempControl.cc.Ki)));
+    PyDict_SetItemString(d, "Kd", PPyObject(tempDiffToPyFloat(unit, tempControl.cc.Kd)));
+    PyDict_SetItemString(d, "iMaxError", PPyObject(tempDiffToPyFloat(unit, tempControl.cc.iMaxError)));
+    PyDict_SetItemString(d, "idleRangeHigh", PPyObject(tempDiffToPyFloat(unit, tempControl.cc.idleRangeHigh)));
+    PyDict_SetItemString(d, "idleRangeLow", PPyObject(tempDiffToPyFloat(unit, tempControl.cc.idleRangeLow)));
+    PyDict_SetItemString(d, "heatingTargetUpper", PPyObject(tempDiffToPyFloat(unit, tempControl.cc.heatingTargetUpper)));
+    PyDict_SetItemString(d, "heatingTargetLower", PPyObject(tempDiffToPyFloat(unit, tempControl.cc.heatingTargetLower)));
+    PyDict_SetItemString(d, "coolingTargetUpper", PPyObject(tempDiffToPyFloat(unit, tempControl.cc.coolingTargetUpper)));
+    PyDict_SetItemString(d, "coolingTargetLower", PPyObject(tempDiffToPyFloat(unit, tempControl.cc.coolingTargetLower)));
     PyDict_SetItemString(d, "maxHeatTimeForEstimate", PPyObject(PyLong_FromLong(tempControl.cc.maxHeatTimeForEstimate)));
     PyDict_SetItemString(d, "maxCoolTimeForEstimate", PPyObject(PyLong_FromLong(tempControl.cc.maxCoolTimeForEstimate)));
     PyDict_SetItemString(d, "fridgeFastFilter", PPyObject(PyLong_FromLong(tempControl.cc.fridgeFastFilter)));
@@ -744,7 +649,7 @@ TempControl_getControlConstants(TempControl_Object *self, PyObject *args) {
     PyDict_SetItemString(d, "beerSlopeFilter", PPyObject(PyLong_FromLong(tempControl.cc.beerSlopeFilter)));
     PyDict_SetItemString(d, "lightAsHeater", PPyObject(PyLong_FromLong(tempControl.cc.lightAsHeater)));
     PyDict_SetItemString(d, "rotaryHalfSteps", PPyObject(PyLong_FromLong(tempControl.cc.rotaryHalfSteps)));
-    PyDict_SetItemString(d, "pidMax", PPyObject(PyFloat_FromDouble(convertTempDiff(self, tempDiffToDouble(tempControl.cc.pidMax)))));
+    PyDict_SetItemString(d, "pidMax", PPyObject(tempDiffToPyFloat(unit, tempControl.cc.pidMax)));
     return d;
 }
 
@@ -768,7 +673,9 @@ static PyMethodDef TempControl_Methods[] = {
     {"setCooler", (PyCFunction) TempControl_setCooler, METH_VARARGS, NULL},
     {"initFilters", (PyCFunction) TempControl_initFilters, METH_NOARGS, NULL},
     {"getControlSettings", (PyCFunction) TempControl_getControlSettings, METH_NOARGS, NULL},
+    {"setControlSettings", (PyCFunction) TempControl_setControlSettings, METH_VARARGS, NULL},
     {"getControlVariables", (PyCFunction) TempControl_getControlVariables, METH_NOARGS, NULL},
+    {"setControlVariables", (PyCFunction) TempControl_setControlVariables, METH_VARARGS, NULL},
     {"getControlConstants", (PyCFunction) TempControl_getControlConstants, METH_NOARGS, NULL},
     {NULL, NULL, 0, NULL}        /* Sentinel */
 };
