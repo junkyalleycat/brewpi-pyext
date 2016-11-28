@@ -13,6 +13,7 @@
 
 #include <Python.h>
 #include "TemperatureFormats.h"
+#include "cpy.h"
 
 /*
    It seems that the TempControl code has mostly
@@ -41,11 +42,8 @@ double convertFromTemp(char unit, double temp);
 double convertToTempDiff(char unit, double temp_c);
 double convertFromTempDiff(char unit, double temp);
 void pyerr_printf(const char *format, ...);
-// borrowedref
-PyObject *getFromDict(PyObject *d, const char *key);
+CPyObject getFromDict(PyObject *d, const char *key);
 temperature pyNumToTemp(char unit, PyObject *n);
 temperature pyNumToTempDiff(char unit, PyObject *n);
-// newref
-PyObject *tempToPyFloat(char unit, temperature t);
-// newref
-PyObject *tempDiffToPyFloat(char unit, temperature t);
+CPyObject tempToPyFloat(char unit, temperature t);
+CPyObject tempDiffToPyFloat(char unit, temperature t);

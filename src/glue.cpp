@@ -19,62 +19,7 @@
 #include <typeinfo>
 #include "utils.h"
 #include "cpy.h"
-
-// defaults taken from DeviceManager.cpp
-ValueSensor<bool> defaultSensor(false);  
-ValueActuator defaultActuator;           
-DisconnectedTempSensor defaultTempSensor;
-// loaded normally in Brewpi.cpp
-TicksImpl ticks = TicksImpl();
-
-// called when TempControl door is open/shut, i don't have a door switch
-void PiLink::printFridgeAnnotation(char const *, ...) {
-    PyErr_SetString(PyExc_RuntimeError, "unimplemented: printFridgeAnnotation"); 
-    throw std::exception();
-}
-
-// not called
-void delay(unsigned long v) {
-    PyErr_SetString(PyExc_RuntimeError, "unimplemented: delay"); 
-    throw std::exception();
-}
-
-// called only when TempControl.load is called
-void eeprom_read_block(void *__dst, const void *__src, size_t __n) {
-    PyErr_SetString(PyExc_RuntimeError, "unimplemented: eeprom_read_block"); 
-    throw std::exception();
-}
-
-// called only when TempControl.save is called
-void eeprom_update_block(const void *__src, void *__dst, size_t __n) {
-    PyErr_SetString(PyExc_RuntimeError, "unimplemented: eeprom_update_block"); 
-    throw std::exception();
-}
-
-/*
-   The following methods are actually called and need impl
-   */
-// called from TempControl, like once
-void Logger::logMessageVaArg(char type, LOG_ID_TYPE errorID, const char * varTypes, ...) {
-    // logger too weird to implement, don't care about log messages right now
-}
-
-// used by Ticks
-unsigned long millis() {
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    unsigned long long millisecondsSinceEpoch =
-        (unsigned long long)(tv.tv_sec) * 1000 +
-        (unsigned long long)(tv.tv_usec) / 1000;
-    return millisecondsSinceEpoch;
-}
-
-// called from TempControl whenever temp changes
-void EepromManager::storeTempSettings() {
-    // do nothing, temp is provided by construction
-    // if one wishes to serialize the settings, use
-    // store and load
-}
+#include <memory>
 
 /*
    PyBasicTempSensor wraps a BasicTempSensor.  It calls
@@ -90,16 +35,12 @@ void EepromManager::storeTempSettings() {
 class PyBasicTempSensor : public BasicTempSensor {
 
     private:
-        CPyObject *py_sensor;
+        CPyObject py_sensor;
 
     public:
-        PyBasicTempSensor(CPyObject *py_sensor) {
+        PyBasicTempSensor(CPyObject py_sensor) {
             this->py_sensor = py_sensor;
         }
-
-        ~PyBasicTempSensor() {
-            delete(py_sensor);
-        } 
 
         bool isConnected(void) {
             return true;
@@ -109,12 +50,12 @@ class PyBasicTempSensor : public BasicTempSensor {
         }
 
         temperature read() {
-            PPyObject m(PyObject_GetAttrString(*this->py_sensor, "read"));
-            PPyObject kw(PyDict_New());
-            PPyObject unit(PyUnicode_FromString("c"));
+            CPyObject m(PyObject_GetAttrString(this->py_sensor, "read"));
+            CPyObject kw(PyDict_New());
+            CPyObject unit(PyUnicode_FromString("c"));
             PyDict_SetItemString(kw, "unit", unit);
-            PPyObject args(PyTuple_New(0));
-            PPyObject r(PyObject_Call(m, args, kw));
+            CPyObject args(PyTuple_New(0));
+            CPyObject r(PyObject_Call(m, args, kw));
             
             temperature temp;
             if(r == Py_None) {
@@ -145,26 +86,21 @@ class PyBasicTempSensor : public BasicTempSensor {
 class PyActuator : public Actuator {
 
     private:
-        CPyObject *py_switch;
+        CPyObject py_switch;
 
     public:
-        PyActuator(CPyObject *py_switch) {
+        PyActuator(CPyObject py_switch) {
             this->py_switch = py_switch;
         }
 
-        ~PyActuator() {
-            delete(this->py_switch);
-        }
-
         void setActive(bool active) {
-            PyObject *m_;
+            CPyObject m;
             if(active) {
-                m_ = PyObject_GetAttrString(*this->py_switch, "on");
+                m.reset(PyObject_GetAttrString(this->py_switch, "on"));
             } else {
-                m_ = PyObject_GetAttrString(*this->py_switch, "off");
+                m.reset(PyObject_GetAttrString(this->py_switch, "off"));
             }
-            PPyObject m(m_);
-            PPyObject r(PyObject_CallObject(m, NULL)); 
+            CPyObject r(PyObject_CallObject(m, NULL)); 
         }
 
         bool isActive() {
@@ -185,33 +121,27 @@ static bool initialized = false;
    set on tempControl that need to be freed
    later.
    */
+
+class TempControlRefs {
+    public:
+        std::unique_ptr<BasicTempSensor> basicBeerSensor;
+        std::unique_ptr<TempSensor> beerSensor;
+        std::unique_ptr<BasicTempSensor> basicFridgeSensor;
+        std::unique_ptr<TempSensor> fridgeSensor;
+        std::unique_ptr<PyActuator> heater;
+        std::unique_ptr<PyActuator> cooler;
+};
+
 typedef struct {
     PyObject_HEAD
-    TempSensor *beerSensor;
-    TempSensor *fridgeSensor;
-    PyActuator *heater;
-    PyActuator *cooler;
-    char unit; // unit used when returning information using getters
+    TempControlRefs *refs;
+    char unit;
 } TempControl_Object;
 
 static void
 TempControl_dealloc__(TempControl_Object *self) {
-    if(self->beerSensor != NULL) {
-        delete(&self->beerSensor->sensor());
-        delete(self->beerSensor);
-    }
-    if(self->fridgeSensor != NULL) {
-        delete(&self->fridgeSensor->sensor());
-        delete(self->fridgeSensor);
-    }
-    if(self->heater != NULL) {
-        delete(self->heater);
-    }
-    if(self->cooler != NULL) {
-        delete(self->cooler);
-    }
+    delete(self->refs);
     Py_TYPE(self)->tp_free((PyObject *) self);
-
     initialized = false;
 }
 
@@ -232,6 +162,7 @@ TempControl_new__(PyTypeObject *type, PyObject *args, PyObject *kwds) {
     if(self == NULL) {
         return NULL;
     }
+    self->refs = new TempControlRefs();
 
     initialized = true;
 
@@ -239,33 +170,32 @@ TempControl_new__(PyTypeObject *type, PyObject *args, PyObject *kwds) {
 }
 
 static int TempControl_init__(TempControl_Object *self, PyObject *args, PyObject *kwds) {
-    char *unit_str = NULL;
-    static const char *kwlist[] = {"unit", NULL};
-    if (!PyArg_ParseTupleAndKeywords(args, kwds, "|$s", (char **) kwlist, &unit_str)) {
+    try {
+        char *unit_str = NULL;
+        static const char *kwlist[] = {"unit", NULL};
+        if (!PyArg_ParseTupleAndKeywords(args, kwds, "|$s", (char **) kwlist, &unit_str)) {
+            return -1;
+        }
+
+        // unit should be a string, either 'f' or 'c'
+        char unit;
+        if(unit_str == NULL) {
+            unit = 'c';
+        } else if(strcmp(unit_str, "c") == 0) {
+            unit = 'c';
+        } else if(strcmp(unit_str, "f") == 0) {
+            unit = 'f';
+        } else {
+            PyErr_SetString(PyExc_RuntimeError, "unknown unit specified");
+            return -1;
+        }
+
+        unit = unit;
+
+        return 0;
+    } catch(...) {
         return -1;
     }
-
-    // unit should be a string, either 'f' or 'c'
-    char unit;
-    if(unit_str == NULL) {
-        unit = 'c';
-    } else if(strcmp(unit_str, "c") == 0) {
-        unit = 'c';
-    } else if(strcmp(unit_str, "f") == 0) {
-        unit = 'f';
-    } else {
-        PyErr_SetString(PyExc_RuntimeError, "unknown unit specified");
-        return -1;
-    }
-
-    unit = unit;
-
-    self->beerSensor = NULL;
-    self->fridgeSensor = NULL;
-    self->heater = NULL;
-    self->cooler = NULL;
-
-    return 0;
 }
 
 /*
@@ -276,113 +206,104 @@ static PyObject *
 TempControl_init(PyObject *self, PyObject *args) {
     try {
         tempControl.init();
+        Py_RETURN_NONE;
     } catch(...) {
         return NULL;
     }
-    Py_RETURN_NONE;
 }
 
 static PyObject *
 TempControl_setBeerSensor(TempControl_Object *self, PyObject *args) {
-    if(self->beerSensor != NULL) {
-        PyErr_SetString(PyExc_RuntimeError, "beerSensor already set");
-        return NULL;
-    }
-
-    PyObject *py_sensor_;
-    if(!PyArg_ParseTuple(args, "O", &py_sensor_)) {
-        return NULL;
-    }
-    UPyObject *py_sensor = new UPyObject(py_sensor_);
-    TempSensor *sensor = new TempSensor(TEMP_SENSOR_TYPE_BEER, new PyBasicTempSensor(py_sensor));
     try {
+        PyObject *py_sensor_;
+        if(!PyArg_ParseTuple(args, "O", &py_sensor_)) {
+            return NULL;
+        }
+        CPyObject py_sensor(py_sensor_, true);
+        auto basicSensor = std::make_unique<PyBasicTempSensor>(py_sensor);
+        auto sensor = std::make_unique<TempSensor>(TEMP_SENSOR_TYPE_BEER, basicSensor.get());
+
         sensor->init();
+
+        self->refs->basicBeerSensor = std::move(basicSensor);
+        self->refs->beerSensor = std::move(sensor);
+        tempControl.beerSensor = self->refs->beerSensor.get();
+
+        Py_RETURN_NONE;
     } catch(...) {
-        delete(&sensor->sensor());
-        delete(sensor);
         return NULL;
     }
-    self->beerSensor = sensor;
-    tempControl.beerSensor = sensor;
-
-    Py_RETURN_NONE;
 }
 
 static PyObject *
 TempControl_setFridgeSensor(TempControl_Object *self, PyObject *args) {
-    if(self->fridgeSensor != NULL) {
-        PyErr_SetString(PyExc_RuntimeError, "fridgeSensor already set");
-        return NULL;
-    }
-
-    PyObject *py_sensor_;
-    if(!PyArg_ParseTuple(args, "O", &py_sensor_)) {
-        return NULL;
-    }
-    UPyObject *py_sensor = new UPyObject(py_sensor_);
-    TempSensor *sensor = new TempSensor(TEMP_SENSOR_TYPE_FRIDGE, new PyBasicTempSensor(py_sensor));
     try {
+        PyObject *py_sensor_;
+        if(!PyArg_ParseTuple(args, "O", &py_sensor_)) {
+            return NULL;
+        }
+        CPyObject py_sensor(py_sensor_, true);
+        auto basicSensor = std::make_unique<PyBasicTempSensor>(py_sensor);
+        auto sensor = std::make_unique<TempSensor>(TEMP_SENSOR_TYPE_BEER, basicSensor.get());
+
         sensor->init();
+
+        self->refs->basicFridgeSensor = std::move(basicSensor);
+        self->refs->fridgeSensor = std::move(sensor);
+        tempControl.fridgeSensor = sensor.get();
+
+        Py_RETURN_NONE;
     } catch(...) {
-        delete(&sensor->sensor());
-        delete(sensor);
         return NULL;
     }
-    self->fridgeSensor = sensor;
-    tempControl.fridgeSensor = sensor;
-    Py_RETURN_NONE;
 }
 
 static PyObject *
 TempControl_setHeater(TempControl_Object *self, PyObject *args) {
-    if(self->heater != NULL) {
-        PyErr_SetString(PyExc_RuntimeError, "heater already set");
+    try {
+        PyObject *py_switch_;
+        if(!PyArg_ParseTuple(args, "O", &py_switch_)) {
+            return NULL;
+        }
+        CPyObject py_switch(py_switch_, true);
+        self->refs->heater = std::make_unique<PyActuator>(py_switch);
+        tempControl.heater = self->refs->heater.get();
+
+        Py_RETURN_NONE;
+    } catch(...) {
         return NULL;
     }
-
-    PyObject *py_switch_;
-    if(!PyArg_ParseTuple(args, "O", &py_switch_)) {
-        return NULL;
-    }
-    UPyObject *py_switch = new UPyObject(py_switch_);
-    PyActuator *actuator = new PyActuator(py_switch);
-    self->heater = actuator;
-    tempControl.heater = actuator;
-
-    Py_RETURN_NONE;
 }
 
 static PyObject *
 TempControl_setCooler(TempControl_Object *self, PyObject *args) {
-    if(self->cooler != NULL) {
-        PyErr_SetString(PyExc_RuntimeError, "cooler already set");
+    try {
+        PyObject *py_switch_;
+        if(!PyArg_ParseTuple(args, "O", &py_switch_)) {
+            return NULL;
+        }
+        CPyObject py_switch(py_switch_, true);
+        self->refs->cooler = std::make_unique<PyActuator>(py_switch);
+        tempControl.cooler = self->refs->cooler.get();
+
+        Py_RETURN_NONE;
+    } catch(...) {
         return NULL;
     }
-
-    PyObject *py_switch_;
-    if(!PyArg_ParseTuple(args, "O", &py_switch_)) {
-        return NULL;
-    }
-    UPyObject *py_switch = new UPyObject(py_switch_);
-    PyActuator *actuator = new PyActuator(py_switch);
-    self->cooler = actuator;
-    tempControl.cooler = actuator;
-
-    Py_RETURN_NONE;
 }
 
 static PyObject *
 TempControl_setMode(PyObject *self, PyObject *args) {
-    int mode;
-    if(!PyArg_ParseTuple(args, "i", &mode)) {
-        return NULL;
-    }
     try {
+        int mode;
+        if(!PyArg_ParseTuple(args, "i", &mode)) {
+            return NULL;
+        }
         tempControl.setMode(mode);
+        Py_RETURN_NONE;
     } catch(...) {
         return NULL;
     }
-    Py_RETURN_NONE;
 }
 
 /*
@@ -422,10 +343,10 @@ TempControl_setBeerTemp(TempControl_Object *self, PyObject *args, PyObject *kwds
     try {
         temperature temp = parseSetTempArgs(self, args, kwds);;
         tempControl.setBeerTemp(temp);
+        Py_RETURN_NONE;
     } catch(...) {
         return NULL;
     }
-    Py_RETURN_NONE;
 }
 
 static PyObject *
@@ -433,147 +354,146 @@ TempControl_setFridgeTemp(TempControl_Object *self, PyObject *args, PyObject *kw
     try {                                                        
         temperature temp = parseSetTempArgs(self, args, kwds);
         tempControl.setFridgeTemp(temp);
+        Py_RETURN_NONE;
     } catch(...) {
         return NULL;
     }
-    Py_RETURN_NONE;
 }
 
 static PyObject *
 TempControl_reset(PyObject *self, PyObject *args) {
     try {
         tempControl.reset();
+        Py_RETURN_NONE;
     } catch(...) {
         return NULL;
     }
-    Py_RETURN_NONE;
 }
 
 static PyObject *
 TempControl_loadDefaultSettings(PyObject *self, PyObject *args) {
     try {
         tempControl.loadDefaultSettings();
+        Py_RETURN_NONE;
     } catch(...) {
         return NULL;
     }
-    Py_RETURN_NONE;
 }
 
 static PyObject *
 TempControl_loadDefaultConstants(PyObject *self, PyObject *args) {
     try {
         tempControl.loadDefaultConstants();
+        Py_RETURN_NONE;
     } catch(...) {
         return NULL;
     }
-    Py_RETURN_NONE;
 }
 
 static PyObject *
 TempControl_updateTemperatures(PyObject *self, PyObject *args) {
     try {
         tempControl.updateTemperatures();
+        Py_RETURN_NONE;
     } catch(...) {
         return NULL;
     }
-    Py_RETURN_NONE;
 }
 
 static PyObject *
 TempControl_detectPeaks(PyObject *self, PyObject *args) {
     try {
         tempControl.detectPeaks();
+        Py_RETURN_NONE;
     } catch(...) {
         return NULL;
     }
-    Py_RETURN_NONE;
 }
 
 static PyObject *
 TempControl_updatePID(PyObject *self, PyObject *args) {
     try {
         tempControl.updatePID();
+        Py_RETURN_NONE;
     } catch(...) {
         return NULL;
     }
-    Py_RETURN_NONE;
 }
 
 static PyObject *
 TempControl_getState(PyObject *self, PyObject *args) {
-    unsigned char state;
     try {
-        state = tempControl.getState();
+        unsigned char state = tempControl.getState();
+        return PyLong_FromLong(state);
     } catch(...) {
         return NULL;
     }
-    return PyLong_FromLong(state);
 }
 
 static PyObject *
 TempControl_updateState(PyObject *self, PyObject *args) {
     try {
         tempControl.updateState();
+        Py_RETURN_NONE;
     } catch(...) {
         return NULL;
     }
-    Py_RETURN_NONE;
 }
 
 static PyObject *
 TempControl_updateOutputs(PyObject *self, PyObject *args) {
     try {
         tempControl.updateOutputs();
+        Py_RETURN_NONE;
     } catch(...) {
         return NULL;
     }
-    Py_RETURN_NONE;
 }
 
 static PyObject *
 TempControl_initFilters(PyObject *self, PyObject *args) {
     try {
         tempControl.initFilters();
+        Py_RETURN_NONE;
     } catch(...) {
         return NULL;
     }
-    Py_RETURN_NONE;
 }
 
 static PyObject *
 TempControl_setControlSettings(TempControl_Object *self, PyObject *args) {
-    PyObject *cs;
-    if(!PyArg_ParseTuple(args, "O", &cs)) {
-        return NULL;
-    }
-    if(!PyDict_Check(cs)) {
-        PyErr_SetString(PyExc_RuntimeError, "dictionary expected");
-        return NULL;
-    }
     try {
+        PyObject *cs;
+        if(!PyArg_ParseTuple(args, "O", &cs)) {
+            return NULL;
+        }
+        if(!PyDict_Check(cs)) {
+            PyErr_SetString(PyExc_RuntimeError, "dictionary expected");
+            return NULL;
+        }
         char unit = unit;
         tempControl.cs.mode = pyNumToLong(getFromDict(cs, "mode"));
         tempControl.cs.beerSetting = pyNumToTemp(unit, getFromDict(cs, "beerSetting"));
         tempControl.cs.fridgeSetting = pyNumToTemp(unit, getFromDict(cs, "fridgeSettings"));
         tempControl.cs.heatEstimator = pyNumToTempDiff(unit, getFromDict(cs, "heatEstimator"));
         tempControl.cs.coolEstimator = pyNumToTempDiff(unit, getFromDict(cs, "coolEstimator"));
+        Py_RETURN_NONE;
     } catch(...) {
         return NULL;
     }
-    Py_RETURN_NONE;
 }
 
 static PyObject *
 TempControl_setControlVariables(TempControl_Object *self, PyObject *args) {
-    PyObject *cv;
-    if(!PyArg_ParseTuple(args, "O", &cv)) {
-        return NULL;
-    }
-    if(!PyDict_Check(cv)) {
-        PyErr_SetString(PyExc_RuntimeError, "dictionary expected");
-        return NULL;
-    }
     try {
+        PyObject *cv;
+        if(!PyArg_ParseTuple(args, "O", &cv)) {
+            return NULL;
+        }
+        if(!PyDict_Check(cv)) {
+            PyErr_SetString(PyExc_RuntimeError, "dictionary expected");
+            return NULL;
+        }
         char unit = unit;
         tempControl.cv.beerDiff = pyNumToTempDiff(unit, getFromDict(cv, "beerDiff"));
         tempControl.cv.diffIntegral = pyNumToTempDiff(unit, getFromDict(cv, "diffIntegral"));
@@ -586,71 +506,83 @@ TempControl_setControlVariables(TempControl_Object *self, PyObject *args) {
         tempControl.cv.posPeakEstimate = pyNumToTempDiff(unit, getFromDict(cv, "posPeakEstimate"));
         tempControl.cv.negPeak = pyNumToTempDiff(unit, getFromDict(cv, "negPeak"));
         tempControl.cv.posPeak = pyNumToTempDiff(unit, getFromDict(cv, "posPeak"));
+        Py_RETURN_NONE;
     } catch(...) {
         return NULL;
     }
-    Py_RETURN_NONE;
 }
 
-static NewRef_PyObject *
+static PyObject *
 TempControl_getControlSettings(TempControl_Object *self, PyObject *args) {
-    PPyObject d(PyDict_New());
-    char unit = self->unit;
-    PyDict_SetItemString(d, "mode", PPyObject(PyLong_FromLong(tempControl.cs.mode)));
-    PyDict_SetItemString(d, "beerSetting", PPyObject(tempToPyFloat(unit, tempControl.cs.beerSetting)));
-    PyDict_SetItemString(d, "fridgeSetting", PPyObject(tempToPyFloat(unit, tempControl.cs.fridgeSetting)));
-    PyDict_SetItemString(d, "heatEstimator", PPyObject(tempDiffToPyFloat(unit, tempControl.cs.heatEstimator)));
-    PyDict_SetItemString(d, "coolEstimator", PPyObject(tempDiffToPyFloat(unit, tempControl.cs.coolEstimator)));
-    return d;
+    try {
+        CPyObject d(PyDict_New());
+        char unit = self->unit;
+        PyDict_SetItemString(d, "mode", CPyObject(PyLong_FromLong(tempControl.cs.mode)));
+        PyDict_SetItemString(d, "beerSetting", tempToPyFloat(unit, tempControl.cs.beerSetting));
+        PyDict_SetItemString(d, "fridgeSetting", tempToPyFloat(unit, tempControl.cs.fridgeSetting));
+        PyDict_SetItemString(d, "heatEstimator", tempDiffToPyFloat(unit, tempControl.cs.heatEstimator));
+        PyDict_SetItemString(d, "coolEstimator", tempDiffToPyFloat(unit, tempControl.cs.coolEstimator));
+        return d.release();
+    } catch(...) {
+        return NULL;
+    }
 }
 
-static NewRef_PyObject *
+static PyObject *
 TempControl_getControlVariables(TempControl_Object *self, PyObject *args) {
-    PPyObject d(PyDict_New());
-    char unit = self->unit;
-    PyDict_SetItemString(d, "beerDiff", PPyObject(tempDiffToPyFloat(unit, tempControl.cv.beerDiff)));
-    PyDict_SetItemString(d, "diffIntegral", PPyObject(tempDiffToPyFloat(unit, tempControl.cv.diffIntegral)));
-    PyDict_SetItemString(d, "beerSlope", PPyObject(tempDiffToPyFloat(unit, tempControl.cv.beerSlope)));
-    PyDict_SetItemString(d, "p", PPyObject(tempDiffToPyFloat(unit, tempControl.cv.p)));
-    PyDict_SetItemString(d, "i", PPyObject(tempDiffToPyFloat(unit, tempControl.cv.i)));
-    PyDict_SetItemString(d, "d", PPyObject(tempDiffToPyFloat(unit, tempControl.cv.d)));
-    PyDict_SetItemString(d, "estimatedPeak", PPyObject(tempDiffToPyFloat(unit, tempControl.cv.estimatedPeak)));
-    PyDict_SetItemString(d, "negPeakEstimate", PPyObject(tempDiffToPyFloat(unit, tempControl.cv.negPeakEstimate)));
-    PyDict_SetItemString(d, "posPeakEstimate", PPyObject(tempDiffToPyFloat(unit, tempControl.cv.posPeakEstimate)));
-    PyDict_SetItemString(d, "negPeak", PPyObject(tempDiffToPyFloat(unit, tempControl.cv.negPeak)));
-    PyDict_SetItemString(d, "posPeak", PPyObject(tempDiffToPyFloat(unit, tempControl.cv.posPeak)));
-    return d;
+    try {
+        CPyObject d(PyDict_New());
+        char unit = self->unit;
+        PyDict_SetItemString(d, "beerDiff", tempDiffToPyFloat(unit, tempControl.cv.beerDiff));
+        PyDict_SetItemString(d, "diffIntegral", tempDiffToPyFloat(unit, tempControl.cv.diffIntegral));
+        PyDict_SetItemString(d, "beerSlope", tempDiffToPyFloat(unit, tempControl.cv.beerSlope));
+        PyDict_SetItemString(d, "p", tempDiffToPyFloat(unit, tempControl.cv.p));
+        PyDict_SetItemString(d, "i", tempDiffToPyFloat(unit, tempControl.cv.i));
+        PyDict_SetItemString(d, "d", tempDiffToPyFloat(unit, tempControl.cv.d));
+        PyDict_SetItemString(d, "estimatedPeak", tempDiffToPyFloat(unit, tempControl.cv.estimatedPeak));
+        PyDict_SetItemString(d, "negPeakEstimate", tempDiffToPyFloat(unit, tempControl.cv.negPeakEstimate));
+        PyDict_SetItemString(d, "posPeakEstimate", tempDiffToPyFloat(unit, tempControl.cv.posPeakEstimate));
+        PyDict_SetItemString(d, "negPeak", tempDiffToPyFloat(unit, tempControl.cv.negPeak));
+        PyDict_SetItemString(d, "posPeak", tempDiffToPyFloat(unit, tempControl.cv.posPeak));
+        return d.release();
+    } catch(...) {
+        return NULL;
+    }
 }
 
-static NewRef_PyObject *
+static PyObject *
 TempControl_getControlConstants(TempControl_Object *self, PyObject *args) {
-    PPyObject d(PyDict_New());
-    char unit = self->unit;
-    PyDict_SetItemString(d, "tempFormats", PPyObject(PyLong_FromLong(tempControl.cc.tempFormat)));
-    PyDict_SetItemString(d, "tempSettingMin", PPyObject(tempToPyFloat(unit, tempControl.cc.tempSettingMin)));
-    PyDict_SetItemString(d, "tempSettingMax", PPyObject(tempToPyFloat(unit, tempControl.cc.tempSettingMax)));
-    PyDict_SetItemString(d, "Kp", PPyObject(tempDiffToPyFloat(unit, tempControl.cc.Kp)));
-    PyDict_SetItemString(d, "Ki", PPyObject(tempDiffToPyFloat(unit, tempControl.cc.Ki)));
-    PyDict_SetItemString(d, "Kd", PPyObject(tempDiffToPyFloat(unit, tempControl.cc.Kd)));
-    PyDict_SetItemString(d, "iMaxError", PPyObject(tempDiffToPyFloat(unit, tempControl.cc.iMaxError)));
-    PyDict_SetItemString(d, "idleRangeHigh", PPyObject(tempDiffToPyFloat(unit, tempControl.cc.idleRangeHigh)));
-    PyDict_SetItemString(d, "idleRangeLow", PPyObject(tempDiffToPyFloat(unit, tempControl.cc.idleRangeLow)));
-    PyDict_SetItemString(d, "heatingTargetUpper", PPyObject(tempDiffToPyFloat(unit, tempControl.cc.heatingTargetUpper)));
-    PyDict_SetItemString(d, "heatingTargetLower", PPyObject(tempDiffToPyFloat(unit, tempControl.cc.heatingTargetLower)));
-    PyDict_SetItemString(d, "coolingTargetUpper", PPyObject(tempDiffToPyFloat(unit, tempControl.cc.coolingTargetUpper)));
-    PyDict_SetItemString(d, "coolingTargetLower", PPyObject(tempDiffToPyFloat(unit, tempControl.cc.coolingTargetLower)));
-    PyDict_SetItemString(d, "maxHeatTimeForEstimate", PPyObject(PyLong_FromLong(tempControl.cc.maxHeatTimeForEstimate)));
-    PyDict_SetItemString(d, "maxCoolTimeForEstimate", PPyObject(PyLong_FromLong(tempControl.cc.maxCoolTimeForEstimate)));
-    PyDict_SetItemString(d, "fridgeFastFilter", PPyObject(PyLong_FromLong(tempControl.cc.fridgeFastFilter)));
-    PyDict_SetItemString(d, "fridgeSlowFilter", PPyObject(PyLong_FromLong(tempControl.cc.fridgeSlowFilter)));
-    PyDict_SetItemString(d, "fridgeSlopeFilter", PPyObject(PyLong_FromLong(tempControl.cc.fridgeSlopeFilter)));
-    PyDict_SetItemString(d, "beerFastFilter", PPyObject(PyLong_FromLong(tempControl.cc.beerFastFilter)));
-    PyDict_SetItemString(d, "beerSlowFilter", PPyObject(PyLong_FromLong(tempControl.cc.beerSlowFilter)));
-    PyDict_SetItemString(d, "beerSlopeFilter", PPyObject(PyLong_FromLong(tempControl.cc.beerSlopeFilter)));
-    PyDict_SetItemString(d, "lightAsHeater", PPyObject(PyLong_FromLong(tempControl.cc.lightAsHeater)));
-    PyDict_SetItemString(d, "rotaryHalfSteps", PPyObject(PyLong_FromLong(tempControl.cc.rotaryHalfSteps)));
-    PyDict_SetItemString(d, "pidMax", PPyObject(tempDiffToPyFloat(unit, tempControl.cc.pidMax)));
-    return d;
+    try {
+        CPyObject d(PyDict_New());
+        char unit = self->unit;
+        PyDict_SetItemString(d, "tempFormats", CPyObject(PyLong_FromLong(tempControl.cc.tempFormat)));
+        PyDict_SetItemString(d, "tempSettingMin", tempToPyFloat(unit, tempControl.cc.tempSettingMin));
+        PyDict_SetItemString(d, "tempSettingMax", tempToPyFloat(unit, tempControl.cc.tempSettingMax));
+        PyDict_SetItemString(d, "Kp", tempDiffToPyFloat(unit, tempControl.cc.Kp));
+        PyDict_SetItemString(d, "Ki", tempDiffToPyFloat(unit, tempControl.cc.Ki));
+        PyDict_SetItemString(d, "Kd", tempDiffToPyFloat(unit, tempControl.cc.Kd));
+        PyDict_SetItemString(d, "iMaxError", tempDiffToPyFloat(unit, tempControl.cc.iMaxError));
+        PyDict_SetItemString(d, "idleRangeHigh", tempDiffToPyFloat(unit, tempControl.cc.idleRangeHigh));
+        PyDict_SetItemString(d, "idleRangeLow", tempDiffToPyFloat(unit, tempControl.cc.idleRangeLow));
+        PyDict_SetItemString(d, "heatingTargetUpper", tempDiffToPyFloat(unit, tempControl.cc.heatingTargetUpper));
+        PyDict_SetItemString(d, "heatingTargetLower", tempDiffToPyFloat(unit, tempControl.cc.heatingTargetLower));
+        PyDict_SetItemString(d, "coolingTargetUpper", tempDiffToPyFloat(unit, tempControl.cc.coolingTargetUpper));
+        PyDict_SetItemString(d, "coolingTargetLower", tempDiffToPyFloat(unit, tempControl.cc.coolingTargetLower));
+        PyDict_SetItemString(d, "maxHeatTimeForEstimate", CPyObject(PyLong_FromLong(tempControl.cc.maxHeatTimeForEstimate)));
+        PyDict_SetItemString(d, "maxCoolTimeForEstimate", CPyObject(PyLong_FromLong(tempControl.cc.maxCoolTimeForEstimate)));
+        PyDict_SetItemString(d, "fridgeFastFilter", CPyObject(PyLong_FromLong(tempControl.cc.fridgeFastFilter)));
+        PyDict_SetItemString(d, "fridgeSlowFilter", CPyObject(PyLong_FromLong(tempControl.cc.fridgeSlowFilter)));
+        PyDict_SetItemString(d, "fridgeSlopeFilter", CPyObject(PyLong_FromLong(tempControl.cc.fridgeSlopeFilter)));
+        PyDict_SetItemString(d, "beerFastFilter", CPyObject(PyLong_FromLong(tempControl.cc.beerFastFilter)));
+        PyDict_SetItemString(d, "beerSlowFilter", CPyObject(PyLong_FromLong(tempControl.cc.beerSlowFilter)));
+        PyDict_SetItemString(d, "beerSlopeFilter", CPyObject(PyLong_FromLong(tempControl.cc.beerSlopeFilter)));
+        PyDict_SetItemString(d, "lightAsHeater", CPyObject(PyLong_FromLong(tempControl.cc.lightAsHeater)));
+        PyDict_SetItemString(d, "rotaryHalfSteps", CPyObject(PyLong_FromLong(tempControl.cc.rotaryHalfSteps)));
+        PyDict_SetItemString(d, "pidMax", tempDiffToPyFloat(unit, tempControl.cc.pidMax));
+        return d.release();
+    } catch(...) {
+        return NULL;
+    }
 }
 
 static PyMethodDef TempControl_Methods[] = {

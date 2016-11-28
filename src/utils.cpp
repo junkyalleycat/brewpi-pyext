@@ -71,28 +71,28 @@ long pyNumToLong(PyObject *pyNum) {
     return val;
 }
 
-double tempToUnit(char unit, double temp_c) {
+double internalToUnit(char unit, double temp_c) {
     if(unit == 'c') {
         return temp_c;
     }
     return c2f(temp_c);
 }
 
-double unitToTemp(char unit, double temp) {
+double unitToInternal(char unit, double temp) {
     if(unit == 'c') {
         return temp;
     }
     return f2c(temp);
 }
 
-double tempDiffToUnit(char unit, double temp_c) {
+double internalDiffToUnit(char unit, double temp_c) {
     if(unit == 'c') {
         return temp_c;
     }
     return c2f(temp_c) - 32;
 }
 
-double unitToTempDiff(char unit, double temp) {
+double unitToInternalDiff(char unit, double temp) {
     if(unit == 'c') {
         return temp;
     }
@@ -100,21 +100,19 @@ double unitToTempDiff(char unit, double temp) {
 }
 
 temperature pyNumToTemp(char unit, PyObject *n) {
-    return doubleToTemp(unitToTemp(unit, pyNumToDouble(n)));
+    return doubleToTemp(unitToInternal(unit, pyNumToDouble(n)));
 }
 
 temperature pyNumToTempDiff(char unit, PyObject *n) {
-    return doubleToTempDiff(unitToTempDiff(unit, pyNumToDouble(n)));
+    return doubleToTempDiff(unitToInternalDiff(unit, pyNumToDouble(n)));
 }
 
-// newref
-PyObject *tempToPyFloat(char unit, temperature t) {
-    return PyFloat_FromDouble(tempToUnit(unit, tempToDouble(t)));
+CPyObject tempToPyFloat(char unit, temperature t) {
+    return CPyObject(PyFloat_FromDouble(internalToUnit(unit, tempToDouble(t))));
 }
 
-// newref
-PyObject *tempDiffToPyFloat(char unit, temperature t) {
-    return PyFloat_FromDouble(tempDiffToUnit(unit, tempDiffToDouble(t)));
+CPyObject tempDiffToPyFloat(char unit, temperature t) {
+    return CPyObject(PyFloat_FromDouble(internalDiffToUnit(unit, tempDiffToDouble(t))));
 }
 
 void pyerr_printf(const char *format, ...) {
@@ -123,17 +121,15 @@ void pyerr_printf(const char *format, ...) {
     va_start (args, format);
     vsnprintf(buffer, sizeof(buffer), format, args);
     va_end (args);
-    PPyObject err(PyUnicode_FromString(buffer));
+    CPyObject err(PyUnicode_FromString(buffer));
     PyErr_SetObject(PyExc_RuntimeError, err);
 }
 
-// borrowedref
-PyObject *getFromDict(PyObject *d, const char *key) {
+CPyObject getFromDict(PyObject *d, const char *key) {
     PyObject *o = PyDict_GetItemString(d, key);
     if(o == NULL) {
         pyerr_printf("Key not found: %s", key);  
         throw std::exception();
     }
-    return o;
+    return CPyObject(o, true);
 }
-

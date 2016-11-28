@@ -4,64 +4,83 @@
 // at it moves their decref to the destructor           
 #include <Python.h>
 
-typedef struct {} NewRef_PyObject;                      
-                                                        
-class CPyObject {                                       
-                                                        
-    public:                                             
-        virtual ~CPyObject() {};                        
-        virtual operator PyObject *() = 0;              
-        virtual operator NewRef_PyObject *() = 0;       
-                                                        
-};                                                      
-                                                        
-class PPyObject: public CPyObject {                     
-    private:                                            
-        PyObject *o;                                    
-    public:                                             
-        PPyObject(NewRef_PyObject *o) {
+class CPyObject {
+    private:
+        PyObject *o = nullptr;
+
+        void _reset(PyObject *o, bool protect) {
+            if(this->o != nullptr) {
+                Py_XDECREF(this->o);
+            }
+            if(protect && (o != nullptr)) {
+                Py_XINCREF(o);
+            }
+            this->o = o;
+        }
+
+    public:
+        CPyObject() {
+            reset();
+        }
+
+        CPyObject(PyObject *o) {
+            reset(o);
+        }
+        
+        CPyObject(PyObject *o, bool protect) {
+            reset(o, protect);
+        }
+
+        ~CPyObject() {
+            reset();
+        }
+
+        PyObject *release() {
+            PyObject *o = this->o;
+            this->o = nullptr;
+            return o;
+        }
+
+        void reset() {
+            _reset(nullptr, false);
+        }
+
+        void reset(PyObject *o) {
+            reset(o, false);
+        }
+
+        void reset(PyObject *o, bool protect) {
             if(o == NULL) {
                 throw std::exception();
             }
-            this->o = (PyObject *) o;
+            _reset(o, protect);
         }
-        PPyObject(PyObject *o) {                        
-            if(o == NULL) {                             
-                throw std::exception();                 
-            }                                           
-            this->o = o;                                
-        }                                               
-        ~PPyObject() {                                  
-            Py_XDECREF(o);                              
-        }                                               
-        operator PyObject *() {                         
-            return o;                                   
-        }                                               
-        operator NewRef_PyObject *() {                  
-            Py_XINCREF(o);                              
-            return (NewRef_PyObject *) o;               
-        }                                               
-};                                                      
-                                                        
-class UPyObject: public CPyObject {                     
-    private:                                            
-        PyObject *o;                                    
-    public:                                             
-        UPyObject(PyObject *o) {                        
-            if(o == NULL) {                             
-                throw std::exception();                 
-            }                                           
-            Py_XINCREF(o);                              
-            this->o = o;                                
-        }                                               
-        ~UPyObject() {                                  
-            Py_XDECREF(o);                              
-        }                                               
-        operator PyObject *() {                         
-            return o;                                   
-        }                                               
-        operator NewRef_PyObject *() {                  
-            Py_XINCREF(o);                              
-            return (NewRef_PyObject *) o;               
-        }                                               
-};                                                      
+
+        operator PyObject *() const {
+            return o;
+        }
+
+        // move
+        CPyObject(CPyObject &&that) noexcept {
+            _reset(that.release(), false);
+        }
+
+        CPyObject& operator =(CPyObject &&that) noexcept {
+            if(this != &that) {
+                _reset(that.release(), false);
+            }
+            return *this;
+        }
+
+        // copy
+        CPyObject(const CPyObject &that) {
+            _reset(that.o, true);
+        }
+
+        CPyObject& operator =(const CPyObject &that) {
+            if(this != &that) {
+                _reset(that.o, true);
+            }
+            return *this;
+        }
+};
